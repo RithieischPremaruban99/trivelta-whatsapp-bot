@@ -60,7 +60,7 @@ let _pamToken = null, _pamTokenExpiry = 0;
 async function pamLogin() {
   const { data } = await axios.post(
     `${PAM_URL}/admin-panel-auth/v1/sign-in`,
-    { username: PAM_USER, password: PAM_PASS },
+    { user_name: PAM_USER, password: PAM_PASS },
     { headers: { 'Content-Type': 'application/json' } }
   );
   if (!data?.data?.AccessToken) throw new Error('No AccessToken in sign-in response');
