@@ -210,9 +210,27 @@ const HELP = `👋 *Trivelta Betting Bot*
 // ─────────────────────────────────────────────
 // HANDLERS
 // ─────────────────────────────────────────────
-async function handleBalance(phone, user) {
+async function resolveUser(phone) {
+  const cached = getSession(phone);
+  if (cached?.userId) return cached;
   try {
-    const w = await pamGetWallet(user.userId);
+    const u = await pamFindByPhone(phone);
+    if (u) {
+      const user = { userId: u.user_id || u.id, username: u.username || u.user_name };
+      setSession(phone, user);
+      return user;
+    }
+  } catch (e) {
+    console.error('resolveUser error:', e.message);
+  }
+  return null;
+}
+
+async function handleBalance(phone, user) {
+  const resolved = await resolveUser(phone);
+  if (!resolved) { await sendText(phone, '👋 Your number isn\'t registered. Sign up at trivelta.com first.'); return; }
+  try {
+    const w = await pamGetWallet(resolved.userId);
     const cash   = parseFloat(w.updated_value   || w.cash_balance  || 0).toFixed(2);
     const redeem = parseFloat(w.redeemable_cash  || w.redeemable    || 0).toFixed(2);
     const bonus  = parseFloat(w.bonus_balance    || w.bonus         || 0).toFixed(2);
@@ -222,6 +240,7 @@ async function handleBalance(phone, user) {
     await sendText(phone, '⚠️ Could not fetch balance. Try again shortly.');
   }
 }
+
 
 async function handleOdds(phone) {
   try {
@@ -330,7 +349,9 @@ async function confirmBet(phone) {
   );
 }
 
-async function handleWithdraw(phone, user, amount) {
+async function handleWithdraw(phone, _user, amount) {
+  const user = await resolveUser(phone);
+  if (!user) { await sendText(phone, '👋 Your number isn\'t registered. Sign up at trivelta.com first.'); return; }
   if (!amount || amount <= 0) {
     await sendText(phone, '💸 How much to withdraw?\nExample: *WITHDRAW 100*');
     return;
@@ -372,7 +393,9 @@ async function confirmWithdraw(phone) {
   );
 }
 
-async function handleMyBets(phone, user) {
+async function handleMyBets(phone, _user) {
+  const user = await resolveUser(phone);
+  if (!user) { await sendText(phone, '👋 Your number isn\'t registered. Sign up at trivelta.com first.'); return; }
   try {
     const bets = await pamGetBets(user.userId);
     if (!bets.length) { await sendText(phone, '📭 No recent bets.'); return; }
@@ -397,23 +420,8 @@ async function processMessage(from, text) {
   // Normalise phone: strip 'whatsapp:' prefix, ensure leading +
   const phone = from.replace('whatsapp:', '').replace(/^(?!\+)/, '+');
 
-  // Resolve user
-  let user = getSession(phone);
-  if (!user) {
-    try {
-      const u = await pamFindByPhone(phone);
-      if (!u) {
-        await sendText(phone, `👋 Hi! This number isn't registered.\nSign up at trivelta.com first, then come back.`);
-        return;
-      }
-      user = { userId: u.user_id || u.id, username: u.username || u.user_name };
-      setSession(phone, user);
-    } catch (e) {
-      console.error('User lookup failed:', e.message, JSON.stringify(e.response?.data)?.slice(0, 200));
-      await sendText(phone, '⚠️ Service temporarily unavailable. Please try again.');
-      return;
-    }
-  }
+  // Resolve user (lazy — only required for account actions)
+  let user = getSession(phone) || { userId: null, username: null, phone };
 
   if (!text?.trim()) return;
   console.log(`[${phone}] ${text}`);
