@@ -484,4 +484,10 @@ app.post('/webhook', (req, res) => {
 // Pre-auth on startup
 pamLogin()
   .then(() => app.listen(PORT, () => console.log(`Trivelta WhatsApp Bot running on port ${PORT}`)))
-  .catch(e => { console.error('PAM login failed:', e.message); process.exit(1); });
+  .catch(e => {
+    console.error('PAM login failed:', e.message);
+    console.error('Cognito error detail:', JSON.stringify(e.response?.data));
+    console.error('PAM_USERNAME set:', !!process.env.PAM_USERNAME);
+    console.error('PAM_PASSWORD set:', !!process.env.PAM_PASSWORD);
+    process.exit(1);
+  });
