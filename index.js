@@ -12,6 +12,7 @@
  */
 
 require('dotenv').config();
+const { CognitoUserPool, CognitoUser, AuthenticationDetails } = require('amazon-cognito-identity-js');
 const express = require('express');
 const axios   = require('axios');
 
@@ -32,8 +33,13 @@ const PAM_PASS = process.env.PAM_PASSWORD;
 const PORT     = process.env.PORT || 3000;
 
 // AWS Cognito (public identifiers — not secrets)
-const COGNITO_URL       = 'https://cognito-idp.us-east-2.amazonaws.com/';
+const COGNITO_POOL_ID   = 'us-east-2_jBOW02BwK';
 const COGNITO_CLIENT_ID = '7hbh9c0v53g4i6cuq5ft1p8apg';
+
+const cognitoPool = new CognitoUserPool({
+  UserPoolId: COGNITO_POOL_ID,
+  ClientId:   COGNITO_CLIENT_ID,
+});
 
 // ─────────────────────────────────────────────
 // SESSION  (phone → user) + PENDING  (phone → action)
@@ -56,48 +62,35 @@ function getPending(phone) {
 function clearPending(phone) { pending.delete(phone); }
 
 // ─────────────────────────────────────────────
-// COGNITO AUTH
+// COGNITO AUTH  (SRP flow — same as browser)
 // ─────────────────────────────────────────────
-let _pamToken = null, _pamTokenExpiry = 0, _refreshToken = null;
-
-async function cognitoRequest(target, body) {
-  const { data } = await axios.post(COGNITO_URL, body, {
-    headers: {
-      'X-Amz-Target': `AWSCognitoIdentityProviderService.${target}`,
-      'Content-Type': 'application/x-amz-json-1.1',
-    },
-  });
-  return data;
-}
+let _pamToken = null, _pamTokenExpiry = 0;
 
 async function pamLogin() {
-  const data = await cognitoRequest('InitiateAuth', {
-    AuthFlow: 'USER_PASSWORD_AUTH',
-    AuthParameters: { USERNAME: PAM_USER, PASSWORD: PAM_PASS },
-    ClientId: COGNITO_CLIENT_ID,
-  });
-  const r = data.AuthenticationResult;
-  _pamToken = r.AccessToken;
-  _refreshToken = r.RefreshToken;
-  _pamTokenExpiry = Date.now() + (r.ExpiresIn - 60) * 1000;
-  console.log('PAM: logged in via Cognito');
-}
+  return new Promise((resolve, reject) => {
+    const cognitoUser = new CognitoUser({ Username: PAM_USER, Pool: cognitoPool });
+    const authDetails = new AuthenticationDetails({ Username: PAM_USER, Password: PAM_PASS });
 
-async function pamRefresh() {
-  const data = await cognitoRequest('InitiateAuth', {
-    AuthFlow: 'REFRESH_TOKEN_AUTH',
-    AuthParameters: { REFRESH_TOKEN: _refreshToken },
-    ClientId: COGNITO_CLIENT_ID,
+    cognitoUser.authenticateUser(authDetails, {
+      onSuccess(result) {
+        _pamToken = result.getAccessToken().getJwtToken();
+        _pamTokenExpiry = Date.now() + (3600 - 60) * 1000; // 1h - 60s buffer
+        console.log('PAM: logged in via Cognito SRP');
+        resolve();
+      },
+      onFailure(err) {
+        console.error('PAM Cognito error:', err.message || err);
+        reject(err);
+      },
+      newPasswordRequired() {
+        reject(new Error('Cognito requires a new password — reset it in the PAM first'));
+      },
+    });
   });
-  const r = data.AuthenticationResult;
-  _pamToken = r.AccessToken;
-  _pamTokenExpiry = Date.now() + (r.ExpiresIn - 60) * 1000;
-  console.log('PAM: token refreshed');
 }
 
 async function getToken() {
-  if (!_pamToken) await pamLogin();
-  else if (Date.now() > _pamTokenExpiry) await pamRefresh();
+  if (!_pamToken || Date.now() > _pamTokenExpiry) await pamLogin();
   return _pamToken;
 }
 
@@ -114,7 +107,7 @@ pam.interceptors.request.use(async (config) => {
 pam.interceptors.response.use(null, async (err) => {
   if (err.response?.status === 401 && !err.config._retry) {
     err.config._retry = true;
-    await pamRefresh();
+    await pamLogin(); // re-login on 401
     err.config.headers.Authorization = `Bearer ${_pamToken}`;
     return pam(err.config);
   }
