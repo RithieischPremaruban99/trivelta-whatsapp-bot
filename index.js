@@ -12,7 +12,6 @@
  */
 
 require('dotenv').config();
-const { CognitoUserPool, CognitoUser, AuthenticationDetails } = require('amazon-cognito-identity-js');
 const express = require('express');
 const axios   = require('axios');
 
@@ -32,14 +31,6 @@ const PAM_USER = process.env.PAM_USERNAME;
 const PAM_PASS = process.env.PAM_PASSWORD;
 const PORT     = process.env.PORT || 3000;
 
-// AWS Cognito (public identifiers — not secrets)
-const COGNITO_POOL_ID   = 'us-east-2_jBOW02BwK';
-const COGNITO_CLIENT_ID = '7hbh9c0v53g4i6cuq5ft1p8apg';
-
-const cognitoPool = new CognitoUserPool({
-  UserPoolId: COGNITO_POOL_ID,
-  ClientId:   COGNITO_CLIENT_ID,
-});
 
 // ─────────────────────────────────────────────
 // SESSION  (phone → user) + PENDING  (phone → action)
@@ -62,31 +53,20 @@ function getPending(phone) {
 function clearPending(phone) { pending.delete(phone); }
 
 // ─────────────────────────────────────────────
-// COGNITO AUTH  (SRP flow — same as browser)
+// PAM AUTH  (direct sign-in endpoint)
 // ─────────────────────────────────────────────
 let _pamToken = null, _pamTokenExpiry = 0;
 
 async function pamLogin() {
-  return new Promise((resolve, reject) => {
-    const cognitoUser = new CognitoUser({ Username: PAM_USER, Pool: cognitoPool });
-    const authDetails = new AuthenticationDetails({ Username: PAM_USER, Password: PAM_PASS });
-
-    cognitoUser.authenticateUser(authDetails, {
-      onSuccess(result) {
-        _pamToken = result.getAccessToken().getJwtToken();
-        _pamTokenExpiry = Date.now() + (3600 - 60) * 1000; // 1h - 60s buffer
-        console.log('PAM: logged in via Cognito SRP');
-        resolve();
-      },
-      onFailure(err) {
-        console.error('PAM Cognito error:', err.message || err);
-        reject(err);
-      },
-      newPasswordRequired() {
-        reject(new Error('Cognito requires a new password — reset it in the PAM first'));
-      },
-    });
-  });
+  const { data } = await axios.post(
+    `${PAM_URL}/admin-panel-auth/v1/sign-in`,
+    { username: PAM_USER, password: PAM_PASS },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+  if (!data?.data?.AccessToken) throw new Error('No AccessToken in sign-in response');
+  _pamToken      = data.data.AccessToken;
+  _pamTokenExpiry = Date.now() + (3600 - 60) * 1000; // 1h - 60s buffer
+  console.log('PAM: logged in via admin-panel-auth');
 }
 
 async function getToken() {
@@ -479,8 +459,6 @@ pamLogin()
   .then(() => app.listen(PORT, () => console.log(`Trivelta WhatsApp Bot running on port ${PORT}`)))
   .catch(e => {
     console.error('PAM login failed:', e.message);
-    console.error('Cognito error detail:', JSON.stringify(e.response?.data));
-    console.error('PAM_USERNAME set:', !!process.env.PAM_USERNAME);
-    console.error('PAM_PASSWORD set:', !!process.env.PAM_PASSWORD);
+    console.error('Response:', JSON.stringify(e.response?.data));
     process.exit(1);
   });
