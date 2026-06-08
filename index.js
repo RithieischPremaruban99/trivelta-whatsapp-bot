@@ -447,12 +447,16 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // Twilio sends POST with form-encoded body
 app.post('/webhook', (req, res) => {
+  console.log('Webhook POST received:', JSON.stringify(req.body));
   res.sendStatus(200);
   const from = req.body?.From || '';
   const body = req.body?.Body || '';
   if (!from) return;
   processMessage(from, body).catch(e => console.error('processMessage error:', e.message));
 });
+
+// Some Twilio probes use GET
+app.get('/webhook', (_req, res) => res.sendStatus(200));
 
 // Pre-auth on startup
 pamLogin()
