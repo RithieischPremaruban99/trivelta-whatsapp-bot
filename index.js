@@ -95,9 +95,26 @@ pam.interceptors.response.use(null, async (err) => {
 });
 
 async function pamFindByPhone(phone) {
-  const { data } = await pam.get('/admin-panel-users/v1', { params: { search: phone } });
-  const list = data?.data || data?.users || data || [];
-  return Array.isArray(list) ? list[0] : null;
+  // Strip whatsapp: prefix and normalise
+  const cleaned = phone.replace('whatsapp:', '');
+  // Try several common param patterns
+  const attempts = [
+    { page: 1, limit: 20, search: cleaned },
+    { page: 1, limit: 20, phone_number: cleaned },
+    { page: 1, limit: 20, phone: cleaned },
+    { page: 1, limit: 20, q: cleaned },
+  ];
+  for (const params of attempts) {
+    try {
+      const { data } = await pam.get('/admin-panel-users/v1', { params });
+      const list = data?.data || data?.users || data?.items || data || [];
+      if (Array.isArray(list) && list.length > 0) return list[0];
+      if (list && !Array.isArray(list) && typeof list === 'object') return list;
+    } catch (e) {
+      console.error(`pamFindByPhone attempt failed (${JSON.stringify(params)}):`, e.response?.status, JSON.stringify(e.response?.data)?.slice(0, 200));
+    }
+  }
+  return null;
 }
 async function pamGetWallet(userId) {
   const { data } = await pam.get(`/admin-panel-users/v1/${userId}/wallet`);
@@ -392,7 +409,7 @@ async function processMessage(from, text) {
       user = { userId: u.user_id || u.id, username: u.username || u.user_name };
       setSession(phone, user);
     } catch (e) {
-      console.error('User lookup failed:', e.message);
+      console.error('User lookup failed:', e.message, JSON.stringify(e.response?.data)?.slice(0, 200));
       await sendText(phone, '⚠️ Service temporarily unavailable. Please try again.');
       return;
     }
