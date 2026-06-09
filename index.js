@@ -131,10 +131,34 @@ async function pamGetBets(userId) {
   return data?.data || data?.bets || [];
 }
 async function pamGetEvents() {
-  const { data } = await pam.get('/admin-panel-sportsbook/v1/events-list/list', {
-    params: { page: 1, limit: 8 },
-  });
-  return data?.data || data?.events || [];
+  // Required discriminator: event_type=match
+  // Date range: today (expand window to catch upcoming + live events)
+  const today = new Date();
+  const yyyy  = today.getUTCFullYear();
+  const mm    = String(today.getUTCMonth() + 1).padStart(2, '0');
+  const dd    = String(today.getUTCDate()).padStart(2, '0');
+  const dateStr = `${yyyy}-${mm}-${dd}`;
+  // PAM uses same date for both start and end — returns all events for the day
+  const tomorrowStr = dateStr;
+
+  try {
+    const { data } = await pam.get('/admin-panel-sportsbook/v1/events-list/list', {
+      params: {
+        event_type: 'match',
+        start_date: dateStr,
+        end_date:   tomorrowStr,
+        page:       1,
+        page_size:  20,
+      },
+    });
+    // Response: { success, message, data: { events: [...] } }
+    const list = data?.data?.events || data?.data || data?.events || data?.items || [];
+    console.log(`pamGetEvents: got ${Array.isArray(list) ? list.length : 0} events`);
+    return Array.isArray(list) ? list : [];
+  } catch (e) {
+    console.error('pamGetEvents:', e.response?.status, JSON.stringify(e.response?.data)?.slice(0, 200));
+    return [];
+  }
 }
 async function pamGetMarkets(eventId) {
   const { data } = await pam.get('/admin-panel-sportsbook/v1/get-event-details-markets-data', {
@@ -250,15 +274,16 @@ async function handleOdds(phone) {
     const top = events.slice(0, 8);
     let msg = `⚽ *Live Matches*\n\n`;
     top.forEach((e, i) => {
-      msg += `*${i + 1}* — ${e.event_name || e.name || 'Match'}\n`;
-      if (e.league_name) msg += `   ${e.league_name}\n`;
+      const statusEmoji = e.status === 'Live' ? '🔴' : '📅';
+      msg += `*${i + 1}* ${statusEmoji} ${e.name || e.event_name || 'Match'}\n`;
+      if (e.league || e.league_name) msg += `   ${e.league || e.league_name}\n`;
     });
     msg += `\nReply the number to see odds.`;
 
     setPending(phone, { type: 'odds_selection', events: top });
     await sendText(phone, msg);
   } catch (e) {
-    console.error('handleOdds:', e.message);
+    console.error('handleOdds:', e.message, JSON.stringify(e.response?.data)?.slice(0, 300));
     await sendText(phone, '⚠️ Could not load events. Try again.');
   }
 }
@@ -273,12 +298,12 @@ async function handleEventSelected(phone, user, eventIndex) {
   if (!event) { await sendText(phone, '❓ Invalid selection. Reply *ODDS* again.'); return; }
 
   try {
-    const eventId = event.event_id || event.id;
+    const eventId = event.id || event.event_id;
     const markets = await pamGetMarkets(eventId);
     if (!markets.length) { await sendText(phone, '⚠️ No markets available for this match.'); return; }
 
     const m = markets[0];
-    let msg = `📊 *${event.event_name || 'Match'}*\n*${m.market_name || 'Match Winner'}*\n\n`;
+    let msg = `📊 *${event.name || event.event_name || 'Match'}*\n*${m.market_name || 'Match Winner'}*\n\n`;
     (m.selections || m.outcomes || []).forEach(s => {
       msg += `• ${s.name}: *${s.odds || s.price}*\n`;
     });
