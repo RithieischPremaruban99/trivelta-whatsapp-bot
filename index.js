@@ -95,28 +95,58 @@ pam.interceptors.response.use(null, async (err) => {
 });
 
 async function pamFindByUsername(username) {
-  const { data } = await pam.get('/admin-panel-users/v1', {
-    params: { page: 1, page_size: 5, username },
-  });
-  const list = data?.data || data?.users || data?.items || [];
-  if (Array.isArray(list) && list.length > 0) return list[0];
-  // Some PAMs return the object directly keyed by data
-  if (list && !Array.isArray(list) && list.user_id) return list;
+  // Try direct by-username lookup first, fall back to list search
+  try {
+    const { data } = await pam.get(`/admin-panel-users/v1/by-username/${encodeURIComponent(username.trim())}`);
+    const u = data?.data || data;
+    if (u?.user_id || u?.id) return u;
+  } catch (_) {}
+  // Fallback: search list
+  try {
+    const { data } = await pam.get('/admin-panel-users/v1', {
+      params: { page: 1, page_size: 5, username },
+    });
+    const list = data?.data?.users || data?.data || data?.users || data?.items || [];
+    if (Array.isArray(list) && list.length > 0) return list[0];
+    if (list && !Array.isArray(list) && (list.user_id || list.id)) return list;
+  } catch (_) {}
   return null;
 }
+
 async function pamGetWallet(userId) {
-  const { data } = await pam.get(`/admin-panel-users/v1/${userId}/wallet`);
-  return data?.data || data;
+  // Try wallet endpoint, fall back to user profile for balance fields
+  try {
+    const { data } = await pam.get(`/admin-panel-users/v1/${userId}/wallet`);
+    if (data?.data || data?.cash_balance !== undefined) return data?.data || data;
+  } catch (_) {}
+  // Fallback: extract balance from user profile
+  const { data } = await pam.get(`/admin-panel-users/v1/${userId}`);
+  return data?.data?.wallet || data?.data || data;
 }
+
 async function pamGetUser(userId) {
   const { data } = await pam.get(`/admin-panel-users/v1/${userId}`);
   return data?.data || data;
 }
+
 async function pamGetBets(userId) {
-  const { data } = await pam.get(`/admin-panel-users/v1/${userId}/bets`, {
-    params: { type: 'sportsbook', page: 1 },
-  });
-  return data?.data || data?.bets || [];
+  // Try user-scoped bets endpoint
+  try {
+    const { data } = await pam.get(`/admin-panel-users/v1/${userId}/bets`, {
+      params: { type: 'sportsbook', page: 1, page_size: 10 },
+    });
+    const list = data?.data?.bets || data?.data || data?.bets || [];
+    if (Array.isArray(list)) return list;
+  } catch (_) {}
+  // Fallback: try admin bets list filtered by user
+  try {
+    const { data } = await pam.get('/admin-panel-users/v1/bets', {
+      params: { user_id: userId, page: 1, page_size: 10 },
+    });
+    const list = data?.data?.bets || data?.data || data?.bets || [];
+    if (Array.isArray(list)) return list;
+  } catch (_) {}
+  return [];
 }
 async function pamGetEvents() {
   // Required discriminator: event_type=match
@@ -228,13 +258,15 @@ function parseIntent(text) {
 // ─────────────────────────────────────────────
 const HELP = `👋 *Trivelta Betting Bot*
 
-*ODDS* — Browse today's matches
-*BET 50 on [name]* — Place a bet
+*ODDS* — Browse today's matches & odds
+*BET 50 on [team]* — Place a bet
 *BALANCE* — Check your wallet
 *MY BETS* — Recent bet history
-*WITHDRAW 100* — Request cashout
+*WITHDRAW 100* — Request a cashout
 *LINK username* — Connect your account
-*HELP* — This menu`;
+*HELP* — Show this menu
+
+_Send ODDS to get started_ ⚡`;
 
 const LINK_PROMPT = `🔗 *Link your Trivelta account*\n\nReply: *LINK yourUsername*\nExample: _LINK john_doe_\n\nDon't have an account? Sign up at trivelta.com`;
 
@@ -336,7 +368,7 @@ async function handleEventSelected(phone, user, eventIndex) {
 }
 
 async function handleBet(phone, user, entities) {
-  if (!user) { await sendText(phone, LINK_PROMPT); return; }
+  // Bet flow works without linking — balance check skipped if no user
   if (!entities.amount || entities.amount <= 0) {
     await sendText(phone, '❓ How much to bet?\nExample: *BET 50 on Chelsea*');
     return;
@@ -360,14 +392,16 @@ async function handleBet(phone, user, entities) {
     return;
   }
 
-  try {
-    const w = await pamGetWallet(user.userId);
-    const avail = parseFloat(w.updated_value || w.cash_balance || 0);
-    if (entities.amount > avail) {
-      await sendText(phone, `⚠️ Insufficient balance. You have $${avail.toFixed(2)} available.`);
-      return;
-    }
-  } catch (_) {}
+  if (user?.userId) {
+    try {
+      const w = await pamGetWallet(user.userId);
+      const avail = parseFloat(w.updated_value || w.cash_balance || w.balance || 0);
+      if (entities.amount > avail && avail > 0) {
+        await sendText(phone, `⚠️ Insufficient balance. You have $${avail.toFixed(2)} available.`);
+        return;
+      }
+    } catch (_) {}
+  }
 
   const potWin = (entities.amount * parseFloat(sel.odds)).toFixed(2);
   setPending(phone, {
@@ -505,8 +539,9 @@ async function processMessage(from, text) {
     case 'bet':      return handleBet(phone, resolveUser(phone), { amount, team });
     case 'withdraw': return handleWithdraw(phone, null, amount);
     case 'my_bets':  return handleMyBets(phone);
-    case 'help':
-    default:         return sendText(phone, HELP);
+    case 'help':     return sendText(phone, HELP);
+    case 'fallback':
+    default:         return sendText(phone, `🤔 Didn't catch that.\n\nTry *ODDS* to browse matches, or *HELP* to see all commands.`);
   }
 }
 
