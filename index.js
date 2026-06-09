@@ -111,7 +111,6 @@ async function pamFindByUsername(username) {
 }
 
 async function pamGetWallet(userId, username) {
-  // Search by username (search=user_id: may be restricted) — balance is on the user object
   if (username) {
     try {
       const { data } = await pam.get('/admin-panel-users/v1', {
@@ -119,8 +118,13 @@ async function pamGetWallet(userId, username) {
       });
       const list = Array.isArray(data?.data) ? data.data : [];
       const u = list.find(x => (x.username || '').toLowerCase() === username.toLowerCase()) || list[0];
-      if (u) return u;
-    } catch (_) {}
+      if (u) {
+        console.log(`pamGetWallet [${username}]: primary_currency_balance=${u.primary_currency_balance}, keys=${Object.keys(u).filter(k=>k.includes('balance')||k.includes('cash')).join(',')}`);
+        return u;
+      }
+    } catch (e) {
+      console.error('pamGetWallet error:', e.response?.status, e.message);
+    }
   }
   return {};
 }
