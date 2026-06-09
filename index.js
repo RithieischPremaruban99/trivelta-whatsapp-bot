@@ -94,26 +94,14 @@ pam.interceptors.response.use(null, async (err) => {
   return Promise.reject(err);
 });
 
-async function pamFindByPhone(phone) {
-  // Strip whatsapp: prefix and normalise
-  const cleaned = phone.replace('whatsapp:', '');
-  // Try several common param patterns
-  const attempts = [
-    { page: 1, limit: 20, search: cleaned },
-    { page: 1, limit: 20, phone_number: cleaned },
-    { page: 1, limit: 20, phone: cleaned },
-    { page: 1, limit: 20, q: cleaned },
-  ];
-  for (const params of attempts) {
-    try {
-      const { data } = await pam.get('/admin-panel-users/v1', { params });
-      const list = data?.data || data?.users || data?.items || data || [];
-      if (Array.isArray(list) && list.length > 0) return list[0];
-      if (list && !Array.isArray(list) && typeof list === 'object') return list;
-    } catch (e) {
-      console.error(`pamFindByPhone attempt failed (${JSON.stringify(params)}):`, e.response?.status, JSON.stringify(e.response?.data)?.slice(0, 200));
-    }
-  }
+async function pamFindByUsername(username) {
+  const { data } = await pam.get('/admin-panel-users/v1', {
+    params: { page: 1, page_size: 5, username },
+  });
+  const list = data?.data || data?.users || data?.items || [];
+  if (Array.isArray(list) && list.length > 0) return list[0];
+  // Some PAMs return the object directly keyed by data
+  if (list && !Array.isArray(list) && list.user_id) return list;
   return null;
 }
 async function pamGetWallet(userId) {
@@ -229,6 +217,9 @@ function parseIntent(text) {
 
   if (/\b(odds|events?|matches?|games?|sport|spiele)\b/.test(t)) return { intent: 'odds' };
 
+  const linkMatch = t.match(/^link\s+(\S+)/i) || text.trim().match(/^link\s+(\S+)/i);
+  if (linkMatch) return { intent: 'link', username: linkMatch[1] };
+
   return { intent: 'fallback' };
 }
 
@@ -237,35 +228,46 @@ function parseIntent(text) {
 // ─────────────────────────────────────────────
 const HELP = `👋 *Trivelta Betting Bot*
 
+*ODDS* — Browse today's matches
+*BET 50 on [name]* — Place a bet
 *BALANCE* — Check your wallet
-*ODDS* — Browse live matches
-*BET 50 on Chelsea* — Place a bet
-*MY BETS* — Recent bets
-*WITHDRAW 100* — Cash out
+*MY BETS* — Recent bet history
+*WITHDRAW 100* — Request cashout
+*LINK username* — Connect your account
 *HELP* — This menu`;
+
+const LINK_PROMPT = `🔗 *Link your Trivelta account*\n\nReply: *LINK yourUsername*\nExample: _LINK john_doe_\n\nDon't have an account? Sign up at trivelta.com`;
 
 // ─────────────────────────────────────────────
 // HANDLERS
 // ─────────────────────────────────────────────
-async function resolveUser(phone) {
+function resolveUser(phone) {
   const cached = getSession(phone);
-  if (cached?.userId) return cached;
-  try {
-    const u = await pamFindByPhone(phone);
-    if (u) {
-      const user = { userId: u.user_id || u.id, username: u.username || u.user_name };
-      setSession(phone, user);
-      return user;
-    }
-  } catch (e) {
-    console.error('resolveUser error:', e.message);
-  }
-  return null;
+  return (cached?.userId) ? cached : null;
 }
 
-async function handleBalance(phone, user) {
-  const resolved = await resolveUser(phone);
-  if (!resolved) { await sendText(phone, '👋 Your number isn\'t registered. Sign up at trivelta.com first.'); return; }
+async function handleLink(phone, username) {
+  if (!username) { await sendText(phone, LINK_PROMPT); return; }
+  try {
+    const u = await pamFindByUsername(username.trim());
+    if (!u) {
+      await sendText(phone, `❌ Username *${username}* not found.\n\nCheck the spelling and try again, or visit trivelta.com to register.`);
+      return;
+    }
+    const userId = u.user_id || u.id || u.userId;
+    const uname  = u.username || u.user_name || username;
+    setSession(phone, { userId, username: uname });
+    console.log(`Linked ${phone} → userId=${userId} username=${uname}`);
+    await sendText(phone, `✅ *Account linked!*\n\nWelcome, *${uname}* 🎉\n\nYou can now use BALANCE, MY BETS, and WITHDRAW.\n\nReply *HELP* to see all commands.`);
+  } catch (e) {
+    console.error('handleLink error:', e.message, e.response?.status, JSON.stringify(e.response?.data)?.slice(0,200));
+    await sendText(phone, '⚠️ Could not link account. Try again shortly.');
+  }
+}
+
+async function handleBalance(phone) {
+  const resolved = resolveUser(phone);
+  if (!resolved) { await sendText(phone, LINK_PROMPT); return; }
   try {
     const w = await pamGetWallet(resolved.userId);
     const cash   = parseFloat(w.updated_value   || w.cash_balance  || 0).toFixed(2);
@@ -334,6 +336,7 @@ async function handleEventSelected(phone, user, eventIndex) {
 }
 
 async function handleBet(phone, user, entities) {
+  if (!user) { await sendText(phone, LINK_PROMPT); return; }
   if (!entities.amount || entities.amount <= 0) {
     await sendText(phone, '❓ How much to bet?\nExample: *BET 50 on Chelsea*');
     return;
@@ -391,8 +394,8 @@ async function confirmBet(phone) {
 }
 
 async function handleWithdraw(phone, _user, amount) {
-  const user = await resolveUser(phone);
-  if (!user) { await sendText(phone, '👋 Your number isn\'t registered. Sign up at trivelta.com first.'); return; }
+  const user = resolveUser(phone);
+  if (!user) { await sendText(phone, LINK_PROMPT); return; }
   if (!amount || amount <= 0) {
     await sendText(phone, '💸 How much to withdraw?\nExample: *WITHDRAW 100*');
     return;
@@ -434,9 +437,9 @@ async function confirmWithdraw(phone) {
   );
 }
 
-async function handleMyBets(phone, _user) {
-  const user = await resolveUser(phone);
-  if (!user) { await sendText(phone, '👋 Your number isn\'t registered. Sign up at trivelta.com first.'); return; }
+async function handleMyBets(phone) {
+  const user = resolveUser(phone);
+  if (!user) { await sendText(phone, LINK_PROMPT); return; }
   try {
     const bets = await pamGetBets(user.userId);
     if (!bets.length) { await sendText(phone, '📭 No recent bets.'); return; }
@@ -494,13 +497,14 @@ async function processMessage(from, text) {
   }
 
   // Dispatch intent
-  const { intent, amount, team } = parseIntent(text);
+  const { intent, amount, team, username } = parseIntent(text);
   switch (intent) {
-    case 'balance':  return handleBalance(phone, user);
+    case 'link':     return handleLink(phone, username);
+    case 'balance':  return handleBalance(phone);
     case 'odds':     return handleOdds(phone);
-    case 'bet':      return handleBet(phone, user, { amount, team });
-    case 'withdraw': return handleWithdraw(phone, user, amount);
-    case 'my_bets':  return handleMyBets(phone, user);
+    case 'bet':      return handleBet(phone, resolveUser(phone), { amount, team });
+    case 'withdraw': return handleWithdraw(phone, null, amount);
+    case 'my_bets':  return handleMyBets(phone);
     case 'help':
     default:         return sendText(phone, HELP);
   }
