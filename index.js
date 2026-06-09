@@ -101,10 +101,9 @@ async function pamFindByUsername(username) {
       params: { search: `username:${username.trim()}`, page: 1, page_size: 50 },
     });
     const list = Array.isArray(data?.data) ? data.data : (data?.data?.users || data?.users || data?.items || []);
-    // Prefer exact match
-    const exact = list.find(u =>
-      (u.username || u.user_name || '').toLowerCase() === username.trim().toLowerCase()
-    );
+    // Case-sensitive exact match first, then case-insensitive fallback
+    const exact = list.find(u => (u.username || u.user_name || '') === username.trim())
+               || list.find(u => (u.username || u.user_name || '').toLowerCase() === username.trim().toLowerCase());
     return exact || null;
   } catch (_) {}
   return null;
@@ -117,7 +116,9 @@ async function pamGetWallet(userId, username) {
         params: { search: `username:${username}`, page: 1, page_size: 50 },
       });
       const list = Array.isArray(data?.data) ? data.data : [];
-      const u = list.find(x => (x.username || '').toLowerCase() === username.toLowerCase()) || list[0];
+      const u = list.find(x => (x.username || '') === username)
+             || list.find(x => (x.username || '').toLowerCase() === username.toLowerCase())
+             || list[0];
       if (u) {
         console.log(`pamGetWallet [${username}]: primary_currency_balance=${u.primary_currency_balance}, keys=${Object.keys(u).filter(k=>k.includes('balance')||k.includes('cash')).join(',')}`);
         return u;
