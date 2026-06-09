@@ -161,10 +161,23 @@ async function pamGetEvents() {
   }
 }
 async function pamGetMarkets(eventId) {
-  const { data } = await pam.get('/admin-panel-sportsbook/v1/get-event-details-markets-data', {
-    params: { event_id: eventId },
-  });
-  return data?.data?.markets || data?.markets || [];
+  // POST with body (GET returns 403 IAM error)
+  const { data } = await pam.post(
+    '/admin-panel-sportsbook/v1/get-event-details-markets-data',
+    { event_id: eventId }
+  );
+  // Response: { success, message, data: { markets: [{market_name, selection_name, odds}], available_markets: [] } }
+  const flat = data?.data?.available_markets?.length
+    ? data.data.available_markets
+    : data?.data?.markets || data?.markets || [];
+  // Group by market_name → [{market_name, selections:[{name, odds}]}]
+  const grouped = {};
+  for (const m of flat) {
+    const key = m.market_name || 'Match Winner';
+    if (!grouped[key]) grouped[key] = { market_name: key, market_id: key, selections: [] };
+    grouped[key].selections.push({ name: m.selection_name, odds: m.odds });
+  }
+  return Object.values(grouped);
 }
 
 // ─────────────────────────────────────────────
@@ -304,10 +317,13 @@ async function handleEventSelected(phone, user, eventIndex) {
 
     const m = markets[0];
     let msg = `📊 *${event.name || event.event_name || 'Match'}*\n*${m.market_name || 'Match Winner'}*\n\n`;
-    (m.selections || m.outcomes || []).forEach(s => {
-      msg += `• ${s.name}: *${s.odds || s.price}*\n`;
+    (m.selections || []).forEach(s => {
+      msg += `• ${s.name}: *${s.odds}*\n`;
     });
-    msg += `\nReply: *BET [amount] on [team]*\nExample: _BET 50 on Chelsea_`;
+    if (!m.selections?.length) {
+      msg += `_(Odds not yet available for this match)_\n`;
+    }
+    msg += `\nReply: *BET [amount] on [name]*\nExample: _BET 50 on ${m.selections?.[0]?.name?.split(' ')[0] || 'Player'}_`;
 
     setPending(phone, { type: 'awaiting_bet', eventId, markets });
     await sendText(phone, msg);
@@ -331,7 +347,7 @@ async function handleBet(phone, user, entities) {
   let sel = null, mkt = null;
   const query = (entities.team || '').toLowerCase();
   for (const market of p.markets || []) {
-    for (const s of market.selections || market.outcomes || []) {
+    for (const s of market.selections || []) {
       if (s.name?.toLowerCase().includes(query)) { sel = s; mkt = market; break; }
     }
     if (sel) break;
@@ -350,16 +366,16 @@ async function handleBet(phone, user, entities) {
     }
   } catch (_) {}
 
-  const potWin = (entities.amount * parseFloat(sel.odds || sel.price)).toFixed(2);
+  const potWin = (entities.amount * parseFloat(sel.odds)).toFixed(2);
   setPending(phone, {
     type: 'confirm_bet',
     bet: { userId: user.userId, eventId: p.eventId, marketId: mkt.market_id || mkt.id,
            selectionId: sel.selection_id || sel.id, selectionName: sel.name,
-           stake: entities.amount, odds: sel.odds || sel.price },
+           stake: entities.amount, odds: sel.odds },
   });
 
   await sendText(phone, formatMenu(
-    `🎯 *Confirm Bet*\n\nSelection: *${sel.name}*\nOdds: *${sel.odds || sel.price}*\nStake: *$${entities.amount}*\nPotential win: *$${potWin}*`,
+    `🎯 *Confirm Bet*\n\nSelection: *${sel.name}*\nOdds: *${sel.odds}*\nStake: *$${entities.amount}*\nPotential win: *$${potWin}*`,
     [{ label: 'Confirm ✅' }, { label: 'Cancel ❌' }]
   ));
 }
