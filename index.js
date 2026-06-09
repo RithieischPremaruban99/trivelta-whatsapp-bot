@@ -95,57 +95,43 @@ pam.interceptors.response.use(null, async (err) => {
 });
 
 async function pamFindByUsername(username) {
-  // Try direct by-username lookup first, fall back to list search
-  try {
-    const { data } = await pam.get(`/admin-panel-users/v1/by-username/${encodeURIComponent(username.trim())}`);
-    const u = data?.data || data;
-    if (u?.user_id || u?.id) return u;
-  } catch (_) {}
-  // Fallback: search list
+  // Search by username — use large page_size and find exact match
   try {
     const { data } = await pam.get('/admin-panel-users/v1', {
-      params: { page: 1, page_size: 5, username },
+      params: { search: `username:${username.trim()}`, page: 1, page_size: 50 },
     });
-    const list = data?.data?.users || data?.data || data?.users || data?.items || [];
-    if (Array.isArray(list) && list.length > 0) return list[0];
-    if (list && !Array.isArray(list) && (list.user_id || list.id)) return list;
+    const list = Array.isArray(data?.data) ? data.data : (data?.data?.users || data?.users || data?.items || []);
+    // Prefer exact match
+    const exact = list.find(u =>
+      (u.username || u.user_name || '').toLowerCase() === username.trim().toLowerCase()
+    );
+    return exact || null;
   } catch (_) {}
   return null;
 }
 
-async function pamGetWallet(userId) {
-  // Try wallet endpoint, fall back to user profile for balance fields
-  try {
-    const { data } = await pam.get(`/admin-panel-users/v1/${userId}/wallet`);
-    if (data?.data || data?.cash_balance !== undefined) return data?.data || data;
-  } catch (_) {}
-  // Fallback: extract balance from user profile
-  const { data } = await pam.get(`/admin-panel-users/v1/${userId}`);
-  return data?.data?.wallet || data?.data || data;
+async function pamGetWallet(userId, username) {
+  // Search by username (search=user_id: may be restricted) — balance is on the user object
+  if (username) {
+    try {
+      const { data } = await pam.get('/admin-panel-users/v1', {
+        params: { search: `username:${username}`, page: 1, page_size: 50 },
+      });
+      const list = Array.isArray(data?.data) ? data.data : [];
+      const u = list.find(x => (x.username || '').toLowerCase() === username.toLowerCase()) || list[0];
+      if (u) return u;
+    } catch (_) {}
+  }
+  return {};
 }
 
-async function pamGetUser(userId) {
-  const { data } = await pam.get(`/admin-panel-users/v1/${userId}`);
-  return data?.data || data;
+async function pamGetUser(userId, username) {
+  return pamGetWallet(userId, username);
 }
 
 async function pamGetBets(userId) {
-  // Try user-scoped bets endpoint
-  try {
-    const { data } = await pam.get(`/admin-panel-users/v1/${userId}/bets`, {
-      params: { type: 'sportsbook', page: 1, page_size: 10 },
-    });
-    const list = data?.data?.bets || data?.data || data?.bets || [];
-    if (Array.isArray(list)) return list;
-  } catch (_) {}
-  // Fallback: try admin bets list filtered by user
-  try {
-    const { data } = await pam.get('/admin-panel-users/v1/bets', {
-      params: { user_id: userId, page: 1, page_size: 10 },
-    });
-    const list = data?.data?.bets || data?.data || data?.bets || [];
-    if (Array.isArray(list)) return list;
-  } catch (_) {}
+  // bet-history requires IAM signing — returns 403 with Bearer token
+  // Return empty array; MY BETS shows graceful message
   return [];
 }
 async function pamGetEvents() {
@@ -301,11 +287,16 @@ async function handleBalance(phone) {
   const resolved = resolveUser(phone);
   if (!resolved) { await sendText(phone, LINK_PROMPT); return; }
   try {
-    const w = await pamGetWallet(resolved.userId);
-    const cash   = parseFloat(w.updated_value   || w.cash_balance  || 0).toFixed(2);
-    const redeem = parseFloat(w.redeemable_cash  || w.redeemable    || 0).toFixed(2);
-    const bonus  = parseFloat(w.bonus_balance    || w.bonus         || 0).toFixed(2);
-    await sendText(phone, `💰 *Your Balance*\n\nCash: *$${cash}*\nRedeemable: *$${redeem}*\nBonus: *$${bonus}*`);
+    const w = await pamGetWallet(resolved.userId, resolved.username);
+    const cash     = parseFloat(w.primary_currency_balance || w.updated_value || w.cash_balance || 0);
+    const notWaged = parseFloat(w.primary_not_wagered_currency_balance || 0);
+    const withdraw = Math.max(0, cash - notWaged);
+    const bonus    = parseFloat(w.primary_free_currency_balance || w.bonus_balance || w.bonus || 0);
+    const casino   = parseFloat(w.casino_cash || 0);
+    let msg = `💰 *Your Balance*\n\nCash: *₦${cash.toFixed(2)}*\nWithdrawable: *₦${withdraw.toFixed(2)}*`;
+    if (bonus > 0) msg += `\nBonus: *₦${bonus.toFixed(2)}*`;
+    if (casino > 0) msg += `\nCasino: *₦${casino.toFixed(2)}*`;
+    await sendText(phone, msg);
   } catch (e) {
     console.error('handleBalance:', e.message);
     await sendText(phone, '⚠️ Could not fetch balance. Try again shortly.');
@@ -394,10 +385,10 @@ async function handleBet(phone, user, entities) {
 
   if (user?.userId) {
     try {
-      const w = await pamGetWallet(user.userId);
-      const avail = parseFloat(w.updated_value || w.cash_balance || w.balance || 0);
+      const w = await pamGetWallet(user.userId, user.username);
+      const avail = parseFloat(w.primary_currency_balance || w.updated_value || w.cash_balance || w.balance || 0);
       if (entities.amount > avail && avail > 0) {
-        await sendText(phone, `⚠️ Insufficient balance. You have $${avail.toFixed(2)} available.`);
+        await sendText(phone, `⚠️ Insufficient balance. You have ₦${avail.toFixed(2)} available.`);
         return;
       }
     } catch (_) {}
@@ -412,7 +403,7 @@ async function handleBet(phone, user, entities) {
   });
 
   await sendText(phone, formatMenu(
-    `🎯 *Confirm Bet*\n\nSelection: *${sel.name}*\nOdds: *${sel.odds}*\nStake: *$${entities.amount}*\nPotential win: *$${potWin}*`,
+    `🎯 *Confirm Bet*\n\nSelection: *${sel.name}*\nOdds: *${sel.odds}*\nStake: *₦${entities.amount}*\nPotential win: *₦${potWin}*`,
     [{ label: 'Confirm ✅' }, { label: 'Cancel ❌' }]
   ));
 }
@@ -423,7 +414,7 @@ async function confirmBet(phone) {
   clearPending(phone);
   // TODO: replace with player-facing bet endpoint once available from PAM backend
   await sendText(phone,
-    `✅ *Bet Placed!*\n\n${p.bet.selectionName} @ ${p.bet.odds}\nStake: $${p.bet.stake}\n\nGood luck! 🍀\nReply *MY BETS* to track it.`
+    `✅ *Bet Placed!*\n\n${p.bet.selectionName} @ ${p.bet.odds}\nStake: ₦${p.bet.stake}\n\nGood luck! 🍀\nReply *MY BETS* to track it.`
   );
 }
 
@@ -435,9 +426,9 @@ async function handleWithdraw(phone, _user, amount) {
     return;
   }
   try {
-    const u = await pamGetUser(user.userId);
-    const kyc = u?.kyc?.status || u?.kyc_status || 'pending';
-    if (!['verified', 'approved'].includes(kyc)) {
+    const u = await pamGetUser(user.userId, user.username);
+    const kyc = u?.kyc_status || u?.kyc?.status || 'not_verified';
+    if (!['verified', 'approved', 'complete'].includes(kyc)) {
       await sendText(phone,
         `🔒 *Identity Verification Required*\n\nYou'll receive a separate WhatsApp message to complete verification.\nOnce done, reply *WITHDRAW ${amount}* again.`
       );
@@ -446,17 +437,19 @@ async function handleWithdraw(phone, _user, amount) {
   } catch (_) {}
 
   try {
-    const w = await pamGetWallet(user.userId);
-    const avail = parseFloat(w.redeemable_cash || w.updated_value || 0);
+    const w = await pamGetWallet(user.userId, user.username);
+    const cash = parseFloat(w.primary_currency_balance || w.updated_value || w.redeemable_cash || 0);
+    const notWaged = parseFloat(w.primary_not_wagered_currency_balance || 0);
+    const avail = Math.max(0, cash - notWaged);
     if (amount > avail) {
-      await sendText(phone, `⚠️ Only $${avail.toFixed(2)} available to withdraw.`);
+      await sendText(phone, `⚠️ Only ₦${avail.toFixed(2)} available to withdraw.`);
       return;
     }
   } catch (_) {}
 
   setPending(phone, { type: 'confirm_withdraw', withdrawal: { userId: user.userId, amount } });
   await sendText(phone, formatMenu(
-    `💸 *Confirm Withdrawal*\n\nAmount: *$${amount}*`,
+    `💸 *Confirm Withdrawal*\n\nAmount: *₦${amount}*`,
     [{ label: 'Confirm ✅' }, { label: 'Cancel ❌' }]
   ));
 }
@@ -467,7 +460,7 @@ async function confirmWithdraw(phone) {
   clearPending(phone);
   // TODO: replace with player-facing withdrawal endpoint once available from PAM backend
   await sendText(phone,
-    `✅ *Withdrawal Requested*\n\n$${p.withdrawal.amount} is being processed.\nYou'll be notified once approved.\n\nReply *BALANCE* to check your balance.`
+    `✅ *Withdrawal Requested*\n\n₦${p.withdrawal.amount} is being processed.\nYou'll be notified once approved.\n\nReply *BALANCE* to check your balance.`
   );
 }
 
@@ -482,7 +475,7 @@ async function handleMyBets(phone) {
       const status = b.status || b.bet_status || 'pending';
       const emoji = status === 'won' ? '✅' : status === 'lost' ? '❌' : '⏳';
       msg += `${emoji} ${b.selection_name || b.event_name || 'Bet'}\n`;
-      msg += `   $${b.stake} @ ${b.odds} — ${status.toUpperCase()}\n\n`;
+      msg += `   ₦${b.stake} @ ${b.odds} — ${status.toUpperCase()}\n\n`;
     });
     await sendText(phone, msg);
   } catch (e) {
