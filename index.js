@@ -95,17 +95,19 @@ pam.interceptors.response.use(null, async (err) => {
 });
 
 async function pamFindByUsername(username) {
-  // Search by username — use large page_size and find exact match
   try {
     const { data } = await pam.get('/admin-panel-users/v1', {
       params: { search: `username:${username.trim()}`, page: 1, page_size: 50 },
     });
     const list = Array.isArray(data?.data) ? data.data : (data?.data?.users || data?.users || data?.items || []);
+    console.log(`pamFindByUsername [${username}]: got ${list.length} results, usernames=[${list.slice(0,10).map(u=>u.username).join(',')}]`);
     // Case-sensitive exact match first, then case-insensitive fallback
     const exact = list.find(u => (u.username || u.user_name || '') === username.trim())
                || list.find(u => (u.username || u.user_name || '').toLowerCase() === username.trim().toLowerCase());
     return exact || null;
-  } catch (_) {}
+  } catch (e) {
+    console.error('pamFindByUsername error:', e.response?.status, e.message);
+  }
   return null;
 }
 
